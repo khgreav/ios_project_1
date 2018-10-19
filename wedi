@@ -1,0 +1,237 @@
+#!/bin/sh
+
+export POSIXLY_CORRECT="yes"
+
+# checking WEDI_RC variable
+if [ -z "$WEDI_RC" ];then 
+	echo "WEDI_RC not set." >&2
+	exit 1
+else
+	if [ ! -f "$WEDI_RC" ]; then # WEDI_RC is set, but file does not exist, create
+		mkdir -p "$(realpath "$(dirname "$WEDI_RC")")" && touch "$WEDI_RC"
+	fi
+fi
+
+if [ -z "$(which realpath)" ]; then # checking for realpath utility
+	echo "Realpath utility not available." >&2
+	exit 1
+fi
+
+# removing records of files that were deleted from wedirc
+counter=1 # variable storing row number, used to delete a specific row
+while read -r line
+do
+	path=$(echo "$line" | sed 's/;;.*//') # extract path from log record
+	if [ ! -f "$path" ]; then
+		sed -i "${counter}d" "$WEDI_RC" 2>/dev/null # sed by default
+		if [ ! $? -eq 0 ]; then
+			gsed -i "${counter}d" "$WEDI_RC" # gsed if the current OS does not support sed
+		fi
+		counter=$((counter-1)) # row deleted, one less row total, this also moves me back where i want to be
+	fi
+	counter=$((counter+1))
+done < "$WEDI_RC"
+
+# function printing names of files edited before a certain date
+beforedate(){
+	while read -r line
+	do
+		editpath=$(echo "$line" | sed 's/;;.*//') # extract path from log record
+		editpath="$(dirname "$editpath")" # separate directory and file
+		if [ "$editpath" = "$beforepath" ]; then
+			editdate=$(echo "$line" | sed 's/.*;;//' | sed 's/-//g') # extract date from log record
+			if [ "$argdate" -gt "$editdate" ]; then
+				beforestring="$beforestring\n"$(echo "$line" | sed 's/;;.*//' | sed 's=.*/==') # append names of files that satisfy the requirements
+			fi
+		else
+			continue
+		fi
+	done < "$WEDI_RC"
+	echo -e "$beforestring" | sort | uniq # print in correct order without duplicates
+}
+
+# function printing names of files edited after a certain date, that date included
+afterdate(){
+	while read -r line
+	do
+		editpath=$(echo "$line" | sed 's/;;.*//') # extract path from log record
+		editpath="$(dirname "$editpath")" # separate directory and file
+		if [ "$editpath" = "$afterpath" ]; then
+			editdate=$(echo "$line" | sed 's/.*;;//' | sed 's/-//g') # extract date from log record
+			if [ "$argdate" -le "$editdate" ]; then
+				afterstring="$afterstring\n"$(echo "$line" | sed 's/;;.*//' | sed 's=.*/==') # append names of files that satisfy the requirements
+			fi
+		else
+			continue
+		fi
+	done < "$WEDI_RC"
+	echo -e "$afterstring" | sort | uniq # print in correct order without duplicates
+}
+
+# function searching for the last edited file in current or specified directory
+lastedited(){
+	lepath=$(printf "$lepath""%s/[^/]+;;") # regex for filepath
+	path=$(grep -E "$lepath" "$WEDI_RC" | tail -1 | sed 's/;;.*//') # extract path from log record
+	if [ ! -f "$path" ]; then
+		echo "File $(basename "$path") no longer exists." >&2
+		exit 1
+	else
+		editlaunch
+		writelog
+	fi
+}
+
+# function searching for the most edited file in current or specified directory
+mostedited(){
+	mepath=$(printf "$mepath""%s/[^/]+;;") # regex for filepath
+	path=$(grep -E "$mepath" "$WEDI_RC" | sed 's/;;.*//' | sort | uniq -c | sort -nr | head -1 | sed 's/.* //') # extract filenames, sort them alphabetically and remove duplicates, then sort by number, most edited is the first one
+	if [ ! -f "$path" ]; then
+		echo "File $(basename "$path") no longer exists." >&2
+		exit 1
+	else
+		editlaunch
+		writelog
+	fi
+}
+
+# function printing a list of files that were edited in current or specified directory
+listfiles(){
+	listpath=$(printf "$listpath""%s/[^/]+;;") # regex for filepath 
+	grep -E "$listpath" "$WEDI_RC" | sed 's/;;.*//' | sort | uniq | sed 's=.*/==' # print a list of filenames, sorted without duplicates
+}
+
+# function writing a record into logfile
+writelog(){
+	echo "$path"";;""$(date '+%Y-%m-%d')" >> "$WEDI_RC"
+}
+
+# function choosing editor from either preset global variables, or vi by default
+editlaunch(){
+if [ -n "$EDITOR" ]; then # check if EDITOR is set
+	if [ -z $(which "$EDITOR") ]; then # check if EDITOR utility exists
+		echo "$EDITOR utility is not available." >&2
+		exit 1
+	fi
+	$EDITOR "$path"
+elif [ -n "$VISUAL" ]; then # check if VISUAL is set
+	if [ -z $(which "$VISUAL") ]; then # check if VISUAL utility exists
+		echo "$VISUAL utility is not available." >&2
+		exit 1
+	fi
+	$VISUAL "$path" 
+else vi "$path" # default behaviour, neither global variable is set
+fi
+}
+
+# function parsing single argument
+argcase1(){
+case $1 in # pattern matching method
+	-m) # most edited in current directory
+		mepath=$(realpath "$(pwd)")
+		mostedited ;;
+	-l) # list of edited files in current directory
+		listpath=$(realpath "$(pwd)")
+		listfiles ;;
+	*) if [ -f "$1" ]; then # open file for editing in current directory
+			path=$(realpath "$1")
+			editlaunch 
+			writelog
+		elif [ -d "$1" ]; then # argument is a directory, find last edited file
+			lepath="$1"
+			lastedited 
+		else
+			echo "File does not exist." >&2
+			exit 1
+		fi ;;
+esac
+}
+
+# function parsing two arguments
+argcase2(){
+case $1 in # pattern matching method
+	-m) if [ -d "$2" ]; then # most edited in directory specified by user
+			mepath=$(realpath "$2")
+			mostedited
+		else
+			echo "Directory "$2" does not exist." >&2
+			exit 1
+		fi ;;
+	-l) if [ -d "$2" ]; then # list of edited files in directory specified by user
+			listpath=$(realpath "$2")
+			listfiles
+		else 
+			echo "Directory "$2" does not exist." >&2
+			exit 1
+		fi ;;
+	-b) case $2 in # list of files edited before a certain dates
+			[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9])
+				argdate=$(echo "$2" | sed 's/-//g') # date from user
+				beforepath=$(realpath "$(pwd)")
+				beforedate ;;
+			*)
+				echo "Invalid date format." >&2
+				exit 1 ;;
+		esac ;;
+	-a) case $2 in # list of files edited after a certain date, that date included
+			[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9])
+				argdate=$(echo "$2" | sed 's/-//g') # date from user
+				afterpath=$(realpath "$(pwd)")
+				afterdate ;;
+			*)
+				echo "Invalid date format." >&2
+				exit 1 ;;
+		esac ;;
+	*) echo "Invalid arguments." # invalid input
+		exit 1
+esac
+}
+
+# function parsing three arguments
+argcase3(){
+case $1 in # pattern matching method
+	-b) case $2 in # list of files edited before a certain date
+			[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) 
+				if [ -d "$3" ]; then
+					argdate=$(echo "$2" | sed 's/-//g') # date from user
+					beforepath=$(realpath "$3")
+					beforedate
+				else
+					echo "Third argument is not a folder." >&2
+					exit 1
+				fi ;;
+			*)
+				echo "Invalid date format." >&2 
+				exit 1 ;;
+		esac ;;
+	-a) case $2 in # list of files edited after a certain date, that date included
+			[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) 
+				if [ -d "$3" ]; then
+					argdate=$(echo "$2" | sed 's/-//g') # date from user
+					afterpath=$(realpath "$3")
+					afterdate
+				else
+					echo "Third argument is not a folder." >&2
+					exit 1
+				fi ;;
+			*) echo "Invalid date format." >&2
+				exit 1 ;;
+		esac ;;
+	*) echo "Invalid arguments." >&2 # invalid input
+		exit 1 ;;
+esac
+}
+
+# selecting a case based on number of arguments
+if [ $# -eq 0 ]; then
+	lepath=$(realpath "$(pwd)")
+	lastedited
+elif [ $# -eq 1 ]; then
+		argcase1 "$1"
+elif [ $# -eq 2 ]; then
+		argcase2 "$1" "$2"
+elif [ $# -eq 3 ]; then 
+		argcase3 "$1" "$2" "$3"
+else 
+	echo "Too many arguments." >&2
+	exit 1
+fi
